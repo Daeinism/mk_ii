@@ -13,6 +13,8 @@
 #define SERVO_PWM_FREQUENCY 50
 #define SERVO_PWM_PERIOD_US 20000
 #define SERVO_PWM_MAX_DUTY 16383
+#define PEN_UP_ANGLE 120
+#define PEN_DOWN_ANGLE 60
 
 void servoInit(void)
 {
@@ -35,6 +37,8 @@ void servoInit(void)
         .hpoint = 0
     };
     ledc_channel_config(&channel);
+
+    servoPenUp();
 }
 
 void servoSetAngle(int angle)
@@ -52,4 +56,14 @@ void servoSetAngle(int angle)
 
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_6, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_6);
+}
+
+void servoPenUp(void)
+{
+    servoSetAngle(PEN_UP_ANGLE);
+}
+
+void servoPenDown(void)
+{
+    servoSetAngle(PEN_DOWN_ANGLE);
 }

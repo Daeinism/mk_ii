@@ -41,7 +41,9 @@ CMD scaraCommands[MAX_CMD] = { // format: {"commandName", number of arguments}
     {"wifiScan", 0},
     {"wifiConnect", 2},
     {"wifiDisconnect", 0},
-    {"s", 1}
+    {"s", 1},
+    {"scaraPenUp", 0},
+    {"scaraPenDown", 0}
 };
 
 static int parseDoubleArgument(const char *text, double *value);
@@ -230,6 +232,8 @@ int validateScaraCommand(SCARA_CONSOLE *con){
         case SCARA_WIFI_STATUS:
         case SCARA_WIFI_SCAN:
         case SCARA_WIFI_DISCONNECT:
+        case SCARA_PEN_UP:
+        case SCARA_PEN_DOWN:
             // nothing to check
             break;
     }
@@ -262,6 +266,16 @@ int executeScaraCommand(SCARA_CONSOLE* con){
             printf("Servo angle set to %d degrees\n", angle);
             return 1;
         }
+
+        case SCARA_PEN_UP:
+            servoPenUp();
+            printf("Pen up\n");
+            return 1;
+
+        case SCARA_PEN_DOWN:
+            servoPenDown();
+            printf("Pen down\n");
+            return 1;
 
         /*------------------------|Simple Homing Command|--------------------------*/
         case SCARA_HOME:
