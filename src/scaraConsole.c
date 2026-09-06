@@ -24,6 +24,7 @@
 #include "limitSwitch.h"
 #include "motor.h"
 #include "scaraMotion.h"
+#include "servo.h"
 #include "voltageReader.h"
 #include "wifiManager.h"
 
@@ -39,7 +40,8 @@ CMD scaraCommands[MAX_CMD] = { // format: {"commandName", number of arguments}
     {"wifiStatus", 0},
     {"wifiScan", 0},
     {"wifiConnect", 2},
-    {"wifiDisconnect", 0}
+    {"wifiDisconnect", 0},
+    {"s", 1}
 };
 
 static int parseDoubleArgument(const char *text, double *value);
@@ -106,6 +108,14 @@ int parseScaraCommand(SCARA_CONSOLE* con){
         }
     }
 
+    if (con->command != NULL && con->command[0] == 's' &&
+        con->command[1] >= '0' && con->command[1] <= '9' &&
+        con->nArgs == 0) {
+        con->args[0] = con->command + 1;
+        con->command = "s";
+        con->nArgs = 1;
+    }
+
     return con->nArgs; //this will be used to validate later
 }
 
@@ -157,6 +167,15 @@ int validateScaraCommand(SCARA_CONSOLE *con){
 
     // 4. Validation specific for each command
     switch(con->cmdInd) {
+        case SCARA_SERVO:
+        {
+            int angle;
+            if (!parseIntArgument(con->args[0], &angle) || angle < 0 || angle > 180) {
+                printf("Error: servo angle must be an integer from 0 to 180.\n");
+                return 0;
+            }
+            break;
+        }
         case SCARA_FK:
         case SET_SCARA_ANGLES:
         {
@@ -236,6 +255,14 @@ int validateScaraCommand(SCARA_CONSOLE *con){
 # -----------------------------------------------------------------------------*/
 int executeScaraCommand(SCARA_CONSOLE* con){
     switch(con->cmdInd){
+        case SCARA_SERVO:
+        {
+            int angle = atoi(con->args[0]);
+            servoSetAngle(angle);
+            printf("Servo angle set to %d degrees\n", angle);
+            return 1;
+        }
+
         /*------------------------|Simple Homing Command|--------------------------*/
         case SCARA_HOME:
             encoderResetLink1Count();

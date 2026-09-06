@@ -29,6 +29,7 @@
 #include "scaraCommandQueue.h"
 #include "scaraConsole.h"
 #include "scaraMotion.h"
+#include "servo.h"
 #include "statusLed.h"
 #include "tcpCommandServer.h"
 #include "voltageReader.h"
@@ -51,6 +52,7 @@ void app_main(void)
     limitSwitchInit(motorEmergencyStop);
         // motorEmergencyStop is just a function pointer, not a function call.
     voltageReaderInit();
+    servoInit();
 
     if (!scaraCommandQueueInit()) {
         printf("Failed to initialize SCARA command queue\n");
