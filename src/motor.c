@@ -9,7 +9,9 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h" // this is for PWM (NOT necessarily for LED)
 
+#include "encoder.h"
 #include "pidCalculator.h"
+#include "velocityLimiter.h"
 
 #define MOTOR1_IN1 GPIO_NUM_1
 #define MOTOR1_IN2 GPIO_NUM_2
@@ -20,6 +22,10 @@
 #define MOTOR_TARGET_TOLERANCE_COUNTS 20
 #define MOTOR_TARGET_SETTLE_TIME_MS 200
 #define MOTOR_TARGET_CHECK_INTERVAL_MS 20
+#define MOTOR_CONTROL_INTERVAL_SECONDS 0.02f
+#define MOTOR_MAX_VELOCITY_DEGREES_PER_SECOND 90.0f
+#define MOTOR_MAX_VELOCITY_COUNTS_PER_SECOND \
+    (ENCODER_COUNTS_PER_REVOLUTION * MOTOR_MAX_VELOCITY_DEGREES_PER_SECOND / 360.0f)
 
 #define MOTOR1_POSITION_KP 0.85f // PID-P: Proportional Gain per error
 #define MOTOR1_POSITION_KI 0.7f // PID-I: Integral Gain per error
@@ -41,13 +47,15 @@ static void motorTask(void *arg);
 static void setMotorDuty(ledc_channel_t in1Channel, ledc_channel_t in2Channel, int signedDuty);
 static void setAllMotorDuty(int signedDuty);
 
-static volatile int32_t link1TargetEncoderCount = 0;
-static volatile int32_t link2TargetEncoderCount = 0;
+static volatile int32_t link1FinalTargetEncoderCount = 0;
+static volatile int32_t link2FinalTargetEncoderCount = 0;
 static volatile bool positionControlEnabled = true; // for lock or release
 static MotorEncoderCountReader readLink1EncoderCount = NULL;
 static MotorEncoderCountReader readLink2EncoderCount = NULL;
 static PidCalculatorState link1PidState = {0};
 static PidCalculatorState link2PidState = {0};
+static VelocityLimiterState link1VelocityLimiterState = {0};
+static VelocityLimiterState link2VelocityLimiterState = {0};
 static const PidCalculatorGains link1PidGains = {
     .kp = MOTOR1_POSITION_KP,
     .ki = MOTOR1_POSITION_KI,
@@ -69,18 +77,28 @@ void motorInit(MotorEncoderCountReader link1EncoderCountReader, MotorEncoderCoun
     readLink2EncoderCount = link2EncoderCountReader;
     pidCalculatorReset(&link1PidState);
     pidCalculatorReset(&link2PidState);
+    velocityLimiterInit(
+        &link1VelocityLimiterState,
+        readLink1EncoderCount(),
+        MOTOR_MAX_VELOCITY_COUNTS_PER_SECOND
+    );
+    velocityLimiterInit(
+        &link2VelocityLimiterState,
+        readLink2EncoderCount(),
+        MOTOR_MAX_VELOCITY_COUNTS_PER_SECOND
+    );
     motorPwmInit();
     xTaskCreate(motorTask, "motorTask", 2048, NULL, 1, NULL);
 }
 
 void motorSetLink1TargetCount(int32_t targetCount)
 {
-    link1TargetEncoderCount = targetCount; // targetCount comes from main.userInputTask (user input degrees → targetCounts)
+    link1FinalTargetEncoderCount = targetCount; // targetCount comes from main.userInputTask (user input degrees → targetCounts)
 }
 
 void motorSetLink2TargetCount(int32_t targetCount)
 {
-    link2TargetEncoderCount = targetCount;
+    link2FinalTargetEncoderCount = targetCount;
 }
 
 bool motorWaitUntilTargetReached(uint32_t timeoutMs)
@@ -91,13 +109,13 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
 
     uint32_t elapsedTimeMs = 0;
     uint32_t settledTimeMs = 0;
-    int32_t awaitedLink1TargetCount = link1TargetEncoderCount;
-    int32_t awaitedLink2TargetCount = link2TargetEncoderCount;
+    int32_t awaitedLink1TargetCount = link1FinalTargetEncoderCount;
+    int32_t awaitedLink2TargetCount = link2FinalTargetEncoderCount;
 
     while (elapsedTimeMs < timeoutMs) {
         if (!positionControlEnabled ||
-            link1TargetEncoderCount != awaitedLink1TargetCount ||
-            link2TargetEncoderCount != awaitedLink2TargetCount) {
+            link1FinalTargetEncoderCount != awaitedLink1TargetCount ||
+            link2FinalTargetEncoderCount != awaitedLink2TargetCount) {
             return false;
         }
 
@@ -130,10 +148,12 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
 void motorHold(void) // used by main.userInputTask
 {
     if (readLink1EncoderCount != NULL) {
-        link1TargetEncoderCount = readLink1EncoderCount();
+        link1FinalTargetEncoderCount = readLink1EncoderCount();
+        velocityLimiterReset(&link1VelocityLimiterState, link1FinalTargetEncoderCount);
     }
     if (readLink2EncoderCount != NULL) {
-        link2TargetEncoderCount = readLink2EncoderCount();
+        link2FinalTargetEncoderCount = readLink2EncoderCount();
+        velocityLimiterReset(&link2VelocityLimiterState, link2FinalTargetEncoderCount);
     }
 
     positionControlEnabled = true;
@@ -144,10 +164,12 @@ void motorRelease(void) // used by main.userInputTask
     positionControlEnabled = false;
 
     if (readLink1EncoderCount != NULL) {
-        link1TargetEncoderCount = readLink1EncoderCount(); // set current position as target position when releasing the motor
+        link1FinalTargetEncoderCount = readLink1EncoderCount(); // set current position as target position when releasing the motor
+        velocityLimiterReset(&link1VelocityLimiterState, link1FinalTargetEncoderCount);
     }
     if (readLink2EncoderCount != NULL) {
-        link2TargetEncoderCount = readLink2EncoderCount();
+        link2FinalTargetEncoderCount = readLink2EncoderCount();
+        velocityLimiterReset(&link2VelocityLimiterState, link2FinalTargetEncoderCount);
     }
 }
 
@@ -156,10 +178,12 @@ void motorEmergencyStop(void) // registered as the limit switch pressed handler
     positionControlEnabled = false;
 
     if (readLink1EncoderCount != NULL) {
-        link1TargetEncoderCount = readLink1EncoderCount();
+        link1FinalTargetEncoderCount = readLink1EncoderCount();
+        velocityLimiterReset(&link1VelocityLimiterState, link1FinalTargetEncoderCount);
     }
     if (readLink2EncoderCount != NULL) {
-        link2TargetEncoderCount = readLink2EncoderCount();
+        link2FinalTargetEncoderCount = readLink2EncoderCount();
+        velocityLimiterReset(&link2VelocityLimiterState, link2FinalTargetEncoderCount);
     }
 
     setAllMotorDuty(0);
@@ -236,8 +260,18 @@ static void motorTask(void *arg) // Processing Target & Error and tossing Reques
         // 1. Setting up the variables 
         int32_t currentLink1Count = readLink1EncoderCount(); // Snapshot the target value from encoderISR
         int32_t currentLink2Count = readLink2EncoderCount();
-        int32_t link1TargetCount = link1TargetEncoderCount; // Snapshot the target value from userInputTask
-        int32_t link2TargetCount = link2TargetEncoderCount;
+        int32_t link1FinalTargetCount = link1FinalTargetEncoderCount;
+        int32_t link2FinalTargetCount = link2FinalTargetEncoderCount;
+        int32_t link1TargetCount = velocityLimiterUpdate(
+            &link1VelocityLimiterState,
+            link1FinalTargetCount,
+            MOTOR_CONTROL_INTERVAL_SECONDS
+        ); // Snapshot the target value from userInputTask
+        int32_t link2TargetCount = velocityLimiterUpdate(
+            &link2VelocityLimiterState,
+            link2FinalTargetCount,
+            MOTOR_CONTROL_INTERVAL_SECONDS
+        );
         int requestedLink1Duty = 0; // Initializing the request value to 0 first.
         int requestedLink2Duty = 0;
         bool controlEnabled = positionControlEnabled; // Updated by userInputTask
@@ -248,14 +282,14 @@ static void motorTask(void *arg) // Processing Target & Error and tossing Reques
                 &link1PidGains,
                 link1TargetCount,
                 currentLink1Count,
-                0.02f
+                MOTOR_CONTROL_INTERVAL_SECONDS
             );
             requestedLink2Duty = pidCalculatorUpdate(
                 &link2PidState,
                 &link2PidGains,
                 link2TargetCount,
                 currentLink2Count,
-                0.02f
+                MOTOR_CONTROL_INTERVAL_SECONDS
             );
                 // 0.02f = 20ms, the time interval between each motorTask loop
         } else {

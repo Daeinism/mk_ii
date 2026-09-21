@@ -26,8 +26,7 @@ int pidCalculatorUpdate(PidCalculatorState *state, const PidCalculatorGains *gai
 
     state->previousCountForDerivative = currentCount;
 
-    if (targetCount != state->previousTargetCount ||
-        (positionError > 0 && state->previousPositionError < 0) ||
+    if ((positionError > 0 && state->previousPositionError < 0) ||
         (positionError < 0 && state->previousPositionError > 0)) {
         state->integralError = 0.0f;
     }
