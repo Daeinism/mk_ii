@@ -20,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "demoMode.h"
 #include "encoder.h"
 #include "limitSwitch.h"
@@ -309,10 +312,11 @@ int executeScaraCommand(SCARA_CONSOLE* con){
 
         /*------------------------|Simple Homing Command|--------------------------*/
         case SCARA_HOME:
+            motorRelease();
+            vTaskDelay(pdMS_TO_TICKS(25));
             encoderResetLink1Count();
             encoderResetLink2Count();
-            motorSetLink1TargetCount(0);
-            motorSetLink2TargetCount(0);
+            motorHold();
             printf("Current position set as home: 0.00 degrees\n");
             return 1;
 
