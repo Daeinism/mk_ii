@@ -9,6 +9,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h" // this is for PWM (NOT necessarily for LED)
 
+#include "dutyScheduler.h"
 #include "encoder.h"
 #include "pidCalculator.h"
 #include "velocityLimiter.h"
@@ -23,9 +24,13 @@
 #define MOTOR_TARGET_SETTLE_TIME_MS 200
 #define MOTOR_TARGET_CHECK_INTERVAL_MS 20
 #define MOTOR_CONTROL_INTERVAL_SECONDS 0.02f
-#define MOTOR_MAX_VELOCITY_DEGREES_PER_SECOND 90.0f
+#define MOTOR_MAX_VELOCITY_DEGREES_PER_SECOND 160.0f
 #define MOTOR_MAX_VELOCITY_COUNTS_PER_SECOND \
     (ENCODER_COUNTS_PER_REVOLUTION * MOTOR_MAX_VELOCITY_DEGREES_PER_SECOND / 360.0f)
+#define MOTOR_BASE_MINIMUM_DUTY 480
+#define MOTOR_RESISTANCE_MINIMUM_DUTY 600
+#define MOTOR_RESISTANCE_START_DEGREES 70.0f
+#define MOTOR_RESISTANCE_FULL_DEGREES 100.0f
 
 #define MOTOR1_POSITION_KP 0.85f // PID-P: Proportional Gain per error
 #define MOTOR1_POSITION_KI 0.7f // PID-I: Integral Gain per error
@@ -50,12 +55,19 @@ static void setAllMotorDuty(int signedDuty);
 static volatile int32_t link1FinalTargetEncoderCount = 0;
 static volatile int32_t link2FinalTargetEncoderCount = 0;
 static volatile bool positionControlEnabled = true; // for lock or release
+static volatile bool movementInProgress = false;
 static MotorEncoderCountReader readLink1EncoderCount = NULL;
 static MotorEncoderCountReader readLink2EncoderCount = NULL;
 static PidCalculatorState link1PidState = {0};
 static PidCalculatorState link2PidState = {0};
 static VelocityLimiterState link1VelocityLimiterState = {0};
 static VelocityLimiterState link2VelocityLimiterState = {0};
+static const DutySchedulerConfig motorDutySchedulerConfig = {
+    .resistanceStartDegrees = MOTOR_RESISTANCE_START_DEGREES,
+    .resistanceFullDegrees = MOTOR_RESISTANCE_FULL_DEGREES,
+    .baseMinimumDuty = MOTOR_BASE_MINIMUM_DUTY,
+    .resistanceMinimumDuty = MOTOR_RESISTANCE_MINIMUM_DUTY
+};
 static const PidCalculatorGains link1PidGains = {
     .kp = MOTOR1_POSITION_KP,
     .ki = MOTOR1_POSITION_KI,
@@ -94,11 +106,13 @@ void motorInit(MotorEncoderCountReader link1EncoderCountReader, MotorEncoderCoun
 void motorSetLink1TargetCount(int32_t targetCount)
 {
     link1FinalTargetEncoderCount = targetCount; // targetCount comes from main.userInputTask (user input degrees → targetCounts)
+    movementInProgress = true;
 }
 
 void motorSetLink2TargetCount(int32_t targetCount)
 {
     link2FinalTargetEncoderCount = targetCount;
+    movementInProgress = true;
 }
 
 bool motorWaitUntilTargetReached(uint32_t timeoutMs)
@@ -119,8 +133,10 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
             return false;
         }
 
-        int64_t link1Error = (int64_t)awaitedLink1TargetCount - readLink1EncoderCount();
-        int64_t link2Error = (int64_t)awaitedLink2TargetCount - readLink2EncoderCount();
+        int32_t currentLink1Count = readLink1EncoderCount();
+        int32_t currentLink2Count = readLink2EncoderCount();
+        int64_t link1Error = (int64_t)awaitedLink1TargetCount - currentLink1Count;
+        int64_t link2Error = (int64_t)awaitedLink2TargetCount - currentLink2Count;
 
         if (link1Error < 0) {
             link1Error = -link1Error;
@@ -132,6 +148,11 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
         if (link1Error <= MOTOR_TARGET_TOLERANCE_COUNTS && link2Error <= MOTOR_TARGET_TOLERANCE_COUNTS) {
             settledTimeMs += MOTOR_TARGET_CHECK_INTERVAL_MS;
             if (settledTimeMs >= MOTOR_TARGET_SETTLE_TIME_MS) {
+                link1FinalTargetEncoderCount = currentLink1Count;
+                link2FinalTargetEncoderCount = currentLink2Count;
+                velocityLimiterReset(&link1VelocityLimiterState, currentLink1Count);
+                velocityLimiterReset(&link2VelocityLimiterState, currentLink2Count);
+                movementInProgress = false;
                 return true;
             }
         } else {
@@ -147,6 +168,8 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
 
 void motorHold(void) // used by main.userInputTask
 {
+    movementInProgress = false;
+
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount();
         velocityLimiterReset(&link1VelocityLimiterState, link1FinalTargetEncoderCount);
@@ -162,6 +185,7 @@ void motorHold(void) // used by main.userInputTask
 void motorRelease(void) // used by main.userInputTask
 {
     positionControlEnabled = false;
+    movementInProgress = false;
 
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount(); // set current position as target position when releasing the motor
@@ -176,6 +200,7 @@ void motorRelease(void) // used by main.userInputTask
 void motorEmergencyStop(void) // registered as the limit switch pressed handler
 {
     positionControlEnabled = false;
+    movementInProgress = false;
 
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount();
@@ -277,16 +302,34 @@ static void motorTask(void *arg) // Processing Target & Error and tossing Reques
         bool controlEnabled = positionControlEnabled; // Updated by userInputTask
 
         if (controlEnabled) {
+            PidCalculatorGains currentLink1PidGains = link1PidGains;
+            PidCalculatorGains currentLink2PidGains = link2PidGains;
+
+            if (!movementInProgress) {
+                int32_t currentJoint2Count = currentLink2Count - currentLink1Count;
+                int32_t targetJoint2Count = link2TargetCount - link1TargetCount;
+                int32_t joint2PositionErrorCount = targetJoint2Count - currentJoint2Count;
+                float joint2AngleDegrees =
+                    currentJoint2Count * 360.0f / ENCODER_COUNTS_PER_REVOLUTION;
+                int scheduledMinimumDuty = dutySchedulerGetMinimumDuty(
+                    &motorDutySchedulerConfig,
+                    joint2AngleDegrees,
+                    joint2PositionErrorCount
+                );
+                currentLink1PidGains.minDuty = scheduledMinimumDuty;
+                currentLink2PidGains.minDuty = scheduledMinimumDuty;
+            }
+
             requestedLink1Duty = pidCalculatorUpdate(
                 &link1PidState,
-                &link1PidGains,
+                &currentLink1PidGains,
                 link1TargetCount,
                 currentLink1Count,
                 MOTOR_CONTROL_INTERVAL_SECONDS
             );
             requestedLink2Duty = pidCalculatorUpdate(
                 &link2PidState,
-                &link2PidGains,
+                &currentLink2PidGains,
                 link2TargetCount,
                 currentLink2Count,
                 MOTOR_CONTROL_INTERVAL_SECONDS
