@@ -26,6 +26,7 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "nvs_flash.h"
+#include "wifiCredentialStore.h"
 
 /*|CONSTANTS|------------------------------------------------------------------*/
 #define WIFI_MANAGER_IP_ADDRESS_LENGTH 16
@@ -47,6 +48,7 @@ static bool wifiDisconnectReasonIsAuthenticationFailure(uint8_t reason);
 static void scheduleAutomaticReconnect(void);
 static void reconnectTimerCallback(TimerHandle_t timer);
 static void wifiReconnectTask(void *arg);
+static void connectToStoredNetwork(void);
 
 /*|Variable Declaration|-------------------------------------------------------*/
 static volatile WIFI_MANAGER_STATUS wifiStatus = WIFI_MANAGER_UNINITIALIZED;
@@ -133,6 +135,7 @@ bool wifiManagerInit(void)
     wifiStatus = WIFI_MANAGER_DISCONNECTED;
     wifiInitialized = true;
     printf("Wi-Fi manager initialized. Status: disconnected\n");
+    connectToStoredNetwork();
     return true;
 }
 
@@ -312,6 +315,10 @@ bool wifiManagerConnect(int networkIndex, const char *password)
         printf("Wi-Fi connected\n");
         printf("SSID: %s\n", connectedSsid);
         printf("IP address: %s\n", wifiIpAddress);
+
+        if (!wifiCredentialStoreSave(connectedSsid, password)) {
+            printf("Wi-Fi connected, but its credentials could not be remembered\n");
+        }
         return true;
     }
 
@@ -596,4 +603,53 @@ static void wifiReconnectTask(void *arg)
             scheduleAutomaticReconnect();
         }
     }
+}
+
+static void connectToStoredNetwork(void)
+{
+    WifiStoredCredential storedCredentials[WIFI_CREDENTIAL_STORE_MAX_ENTRIES];
+    size_t storedCredentialCount = wifiCredentialStoreLoad(storedCredentials);
+
+    if (storedCredentialCount == 0) {
+        printf("Wi-Fi automatic connection skipped: no remembered networks\n");
+        return;
+    }
+
+    printf("Searching for %u remembered Wi-Fi network(s)...\n",
+           (unsigned int)storedCredentialCount);
+
+    if (!wifiManagerScanNetworks()) {
+        printf("Wi-Fi automatic connection failed: network scan failed\n");
+        return;
+    }
+
+    for (size_t credentialIndex = 0;
+         credentialIndex < WIFI_CREDENTIAL_STORE_MAX_ENTRIES;
+         credentialIndex++) {
+        if (!storedCredentials[credentialIndex].valid) {
+            continue;
+        }
+
+        for (uint16_t networkIndex = 0;
+             networkIndex < detectedNetworkCount;
+             networkIndex++) {
+            if (strcmp(storedCredentials[credentialIndex].ssid,
+                       (const char *)detectedNetworks[networkIndex].ssid) != 0) {
+                continue;
+            }
+
+            printf("Automatically connecting to remembered network: %s\n",
+                   storedCredentials[credentialIndex].ssid);
+
+            if (wifiManagerConnect(
+                    networkIndex,
+                    storedCredentials[credentialIndex].password)) {
+                return;
+            }
+
+            break;
+        }
+    }
+
+    printf("Wi-Fi automatic connection failed: no remembered network connected\n");
 }

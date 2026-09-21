@@ -6,10 +6,17 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
+#include "wifiManager.h"
+
 #define RED_LED_GPIO GPIO_NUM_12 //RED LED
 #define GREEN_LED_GPIO GPIO_NUM_11 //GREEN LED
 #define LED_ON_DUTY 500 // max brightness is 1023
 #define LED_OFF_DUTY 0
+#define GREEN_LED_UPDATE_INTERVAL_MS 50
+#define GREEN_LED_DISCONNECTED_ON_MS 500
+#define GREEN_LED_DISCONNECTED_PERIOD_MS 2000
+#define GREEN_LED_CONNECTING_ON_MS 150
+#define GREEN_LED_CONNECTING_PERIOD_MS 300
 
 static void gpioInit(void);
 static void setLedDuty(ledc_channel_t channel, uint32_t duty);
@@ -78,20 +85,51 @@ static void redLedTask(void *arg) // Simple LED task for test
 
 static void greenLedTask(void *arg)
 {
-    int currentDuty = LED_OFF_DUTY;
-    int dutyChange = 1;
+    (void)arg;
+
+    WIFI_MANAGER_STATUS previousStatus = WIFI_MANAGER_UNINITIALIZED;
+    uint32_t patternElapsedMs = 0;
 
     while (1)
     {
-        setLedDuty(LEDC_CHANNEL_5, (uint32_t)currentDuty);
+        WIFI_MANAGER_STATUS currentStatus = wifiManagerGetStatus();
 
-        if (currentDuty >= LED_ON_DUTY) {
-            dutyChange = -1;
-        } else if (currentDuty <= LED_OFF_DUTY) {
-            dutyChange = 1;
+        if (currentStatus != previousStatus) {
+            previousStatus = currentStatus;
+            patternElapsedMs = 0;
         }
 
-        currentDuty += dutyChange;
-        vTaskDelay(pdMS_TO_TICKS(10));
+        uint32_t greenDuty = LED_OFF_DUTY;
+
+        switch (currentStatus) {
+            case WIFI_MANAGER_UNINITIALIZED:
+                greenDuty = LED_OFF_DUTY;
+                break;
+
+            case WIFI_MANAGER_DISCONNECTED:
+                greenDuty = patternElapsedMs < GREEN_LED_DISCONNECTED_ON_MS
+                    ? LED_ON_DUTY
+                    : LED_OFF_DUTY;
+                patternElapsedMs =
+                    (patternElapsedMs + GREEN_LED_UPDATE_INTERVAL_MS) %
+                    GREEN_LED_DISCONNECTED_PERIOD_MS;
+                break;
+
+            case WIFI_MANAGER_CONNECTING:
+                greenDuty = patternElapsedMs < GREEN_LED_CONNECTING_ON_MS
+                    ? LED_ON_DUTY
+                    : LED_OFF_DUTY;
+                patternElapsedMs =
+                    (patternElapsedMs + GREEN_LED_UPDATE_INTERVAL_MS) %
+                    GREEN_LED_CONNECTING_PERIOD_MS;
+                break;
+
+            case WIFI_MANAGER_CONNECTED:
+                greenDuty = LED_ON_DUTY;
+                break;
+        }
+
+        setLedDuty(LEDC_CHANNEL_5, greenDuty);
+        vTaskDelay(pdMS_TO_TICKS(GREEN_LED_UPDATE_INTERVAL_MS));
     }
 }
