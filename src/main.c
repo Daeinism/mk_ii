@@ -22,6 +22,7 @@
 
 #include "driver/gpio.h"
 
+#include "demoMode.h"
 #include "encoder.h"
 #include "limitSwitch.h"
 #include "motor.h"
@@ -53,6 +54,10 @@ void app_main(void)
         // motorEmergencyStop is just a function pointer, not a function call.
     voltageReaderInit();
     servoInit();
+
+    if (!demoModeInit()) {
+        printf("Failed to initialize demo mode\n");
+    }
 
     if (!scaraCommandQueueInit()) {
         printf("Failed to initialize SCARA command queue\n");

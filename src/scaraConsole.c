@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "demoMode.h"
 #include "encoder.h"
 #include "limitSwitch.h"
 #include "motor.h"
@@ -43,11 +44,14 @@ CMD scaraCommands[MAX_CMD] = { // format: {"commandName", number of arguments}
     {"wifiDisconnect", 0},
     {"s", 1},
     {"scaraPenUp", 0},
-    {"scaraPenDown", 0}
+    {"scaraPenDown", 0},
+    {"demoStart", 0},
+    {"demoStop", 0}
 };
 
 static int parseDoubleArgument(const char *text, double *value);
 static int parseIntArgument(const char *text, int *value);
+static int commandConflictsWithDemo(int commandIndex);
 
 /*|Function Definitions|-------------------------------------------------------*/
 /*|initScaraConsole|------------------------------------------------------------
@@ -234,6 +238,8 @@ int validateScaraCommand(SCARA_CONSOLE *con){
         case SCARA_WIFI_DISCONNECT:
         case SCARA_PEN_UP:
         case SCARA_PEN_DOWN:
+        case SCARA_DEMO_START:
+        case SCARA_DEMO_STOP:
             // nothing to check
             break;
     }
@@ -258,7 +264,31 @@ int validateScaraCommand(SCARA_CONSOLE *con){
 # Last Modified: September 4th 2026 by Dain Kim
 # -----------------------------------------------------------------------------*/
 int executeScaraCommand(SCARA_CONSOLE* con){
+    if (demoModeIsRunning() && commandConflictsWithDemo(con->cmdInd)) {
+        printf("Command unavailable while demo mode is running. Type demoStop first.\n");
+        return 0;
+    }
+
     switch(con->cmdInd){
+        case SCARA_DEMO_START:
+            if (demoModeStart()) {
+                printf("Demo mode start requested\n");
+                return 1;
+            }
+
+            printf("Demo mode could not start: it is already running, position control is released, a limit switch is pressed, or initialization failed\n");
+            return 0;
+
+        case SCARA_DEMO_STOP:
+            if (!demoModeIsRunning()) {
+                printf("Demo mode is not running\n");
+                return 0;
+            }
+
+            demoModeStop();
+            printf("Demo mode stop requested\n");
+            return 1;
+
         case SCARA_SERVO:
         {
             int angle = atoi(con->args[0]);
@@ -288,6 +318,9 @@ int executeScaraCommand(SCARA_CONSOLE* con){
 
         /*------------------------|Simple Release Command|--------------------------*/
         case SCARA_RELEASE:
+            if (demoModeIsRunning()) {
+                demoModeStop();
+            }
             motorRelease();
             printf("Position control released\n");
             return 1;
@@ -475,4 +508,14 @@ static int parseIntArgument(const char *text, int *value)
     // Only copy the result to the caller after the entire argument is validated.
     *value = (int)parsedValue;
     return 1;
+}
+
+static int commandConflictsWithDemo(int commandIndex)
+{
+    return commandIndex == SCARA_HOME ||
+           commandIndex == SCARA_HOLD ||
+           commandIndex == SET_SCARA_ANGLES ||
+           commandIndex == SCARA_SERVO ||
+           commandIndex == SCARA_PEN_UP ||
+           commandIndex == SCARA_PEN_DOWN;
 }

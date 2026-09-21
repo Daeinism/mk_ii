@@ -54,6 +54,7 @@ static void setAllMotorDuty(int signedDuty);
 
 static volatile int32_t link1FinalTargetEncoderCount = 0;
 static volatile int32_t link2FinalTargetEncoderCount = 0;
+static volatile uint32_t targetCommandSequence = 0;
 static volatile bool positionControlEnabled = true; // for lock or release
 static volatile bool movementInProgress = false;
 static MotorEncoderCountReader readLink1EncoderCount = NULL;
@@ -106,12 +107,14 @@ void motorInit(MotorEncoderCountReader link1EncoderCountReader, MotorEncoderCoun
 void motorSetLink1TargetCount(int32_t targetCount)
 {
     link1FinalTargetEncoderCount = targetCount; // targetCount comes from main.userInputTask (user input degrees → targetCounts)
+    targetCommandSequence++;
     movementInProgress = true;
 }
 
 void motorSetLink2TargetCount(int32_t targetCount)
 {
     link2FinalTargetEncoderCount = targetCount;
+    targetCommandSequence++;
     movementInProgress = true;
 }
 
@@ -125,9 +128,11 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
     uint32_t settledTimeMs = 0;
     int32_t awaitedLink1TargetCount = link1FinalTargetEncoderCount;
     int32_t awaitedLink2TargetCount = link2FinalTargetEncoderCount;
+    uint32_t awaitedTargetCommandSequence = targetCommandSequence;
 
     while (elapsedTimeMs < timeoutMs) {
         if (!positionControlEnabled ||
+            targetCommandSequence != awaitedTargetCommandSequence ||
             link1FinalTargetEncoderCount != awaitedLink1TargetCount ||
             link2FinalTargetEncoderCount != awaitedLink2TargetCount) {
             return false;
@@ -169,6 +174,7 @@ bool motorWaitUntilTargetReached(uint32_t timeoutMs)
 void motorHold(void) // used by main.userInputTask
 {
     movementInProgress = false;
+    targetCommandSequence++;
 
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount();
@@ -186,6 +192,7 @@ void motorRelease(void) // used by main.userInputTask
 {
     positionControlEnabled = false;
     movementInProgress = false;
+    targetCommandSequence++;
 
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount(); // set current position as target position when releasing the motor
@@ -201,6 +208,7 @@ void motorEmergencyStop(void) // registered as the limit switch pressed handler
 {
     positionControlEnabled = false;
     movementInProgress = false;
+    targetCommandSequence++;
 
     if (readLink1EncoderCount != NULL) {
         link1FinalTargetEncoderCount = readLink1EncoderCount();
