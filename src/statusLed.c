@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
+#include "voltageReader.h"
 #include "wifiManager.h"
 
 #define RED_LED_GPIO GPIO_NUM_12 //RED LED
@@ -17,6 +18,11 @@
 #define GREEN_LED_DISCONNECTED_PERIOD_MS 2000
 #define GREEN_LED_CONNECTING_ON_MS 150
 #define GREEN_LED_CONNECTING_PERIOD_MS 300
+#define RED_LED_UPDATE_INTERVAL_MS 50
+#define RED_LED_LOW_ON_MS 300
+#define RED_LED_LOW_PERIOD_MS 2000
+#define RED_LED_CRITICAL_ON_MS 150
+#define RED_LED_CRITICAL_PERIOD_MS 300
 
 static void gpioInit(void);
 static void setLedDuty(ledc_channel_t channel, uint32_t duty);
@@ -73,13 +79,49 @@ static void setLedDuty(ledc_channel_t channel, uint32_t duty)
 
 static void redLedTask(void *arg) // Simple LED task for test
 {
+    (void)arg;
+
+    BATTERY_STATUS previousStatus = BATTERY_STATUS_UNINITIALIZED;
+    uint32_t patternElapsedMs = 0;
+
     while (1)
     {
-        setLedDuty(LEDC_CHANNEL_4, LED_ON_DUTY);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        BATTERY_STATUS currentStatus = voltageReaderGetStatus();
 
-        setLedDuty(LEDC_CHANNEL_4, LED_OFF_DUTY);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        if (currentStatus != previousStatus) {
+            previousStatus = currentStatus;
+            patternElapsedMs = 0;
+        }
+
+        uint32_t redDuty = LED_OFF_DUTY;
+
+        switch (currentStatus) {
+            case BATTERY_STATUS_UNINITIALIZED:
+            case BATTERY_STATUS_NORMAL:
+                redDuty = LED_OFF_DUTY;
+                break;
+
+            case BATTERY_STATUS_LOW:
+                redDuty = patternElapsedMs < RED_LED_LOW_ON_MS
+                    ? LED_ON_DUTY
+                    : LED_OFF_DUTY;
+                patternElapsedMs =
+                    (patternElapsedMs + RED_LED_UPDATE_INTERVAL_MS) %
+                    RED_LED_LOW_PERIOD_MS;
+                break;
+
+            case BATTERY_STATUS_CRITICAL:
+                redDuty = patternElapsedMs < RED_LED_CRITICAL_ON_MS
+                    ? LED_ON_DUTY
+                    : LED_OFF_DUTY;
+                patternElapsedMs =
+                    (patternElapsedMs + RED_LED_UPDATE_INTERVAL_MS) %
+                    RED_LED_CRITICAL_PERIOD_MS;
+                break;
+        }
+
+        setLedDuty(LEDC_CHANNEL_4, redDuty);
+        vTaskDelay(pdMS_TO_TICKS(RED_LED_UPDATE_INTERVAL_MS));
     }
 }
 
